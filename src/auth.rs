@@ -130,6 +130,11 @@ impl<T: AnisetteProvider> TokenProvider<T> {
         })
     }
 
+    pub async fn set_mme_delegate(&self, delegate: MobileMeDelegateResponse) {
+        *self.mme_delegate.lock().await = Some(delegate);
+        *self.mme_refreshed.lock().await = SystemTime::now();
+    }
+
     pub async fn get_storage_info(&self) -> Result<QuotaData, PushError> {
         let token = self.get_mme_token("mmeAuthToken").await?;
 
@@ -205,7 +210,7 @@ pub struct IDSDelegateResponse {
 #[derive(Deserialize)]
 pub struct MobileMeDelegateResponse {
     pub tokens: HashMap<String, String>,
-    #[serde(default)]
+    #[serde(rename = "com.apple.mobileme", default)]
     pub config: Dictionary,
 }
 
@@ -383,7 +388,7 @@ pub async fn login_apple_delegates<T: AnisetteProvider>(account: &AppleAccount<T
         }
     };
 
-    let validation_data = os_config.generate_validation_data().await?;
+    let validation_data = os_config.generate_validation_data().await.ok();
 
     let base_headers = account.anisette.lock().await.get_headers().await?.clone();
     let mut anisette_headers: HeaderMap = base_headers.into_iter().map(|(a, b)| (HeaderName::from_str(&a).unwrap(), b.parse().unwrap())).collect();
@@ -392,17 +397,22 @@ pub async fn login_apple_delegates<T: AnisetteProvider>(account: &AppleAccount<T
         anisette_headers.insert("Cookie", HeaderValue::from_str(cookie).unwrap());
     }
 
-    let resp = REQWEST.post(os_config.get_login_url())
+    let mut req = REQWEST.post(os_config.get_login_url())
             .header("Accept-Encoding", "gzip")
             .header("User-Agent", os_config.get_normal_ua("com.apple.iCloudHelper/282"))
             .header("X-Mme-Client-Info", os_config.get_mme_clientinfo(&os_config.get_aoskit_version()))
-            .header("X-Mme-Nas-Qualify", base64_encode(&validation_data))
             .header("X-Apple-ADSID", adsid)
             .headers(anisette_headers.clone())
             .basic_auth(username, Some(pet))
-            .body(plist_to_string(&request)?)
-            .send()
-            .await?;
+            .body(plist_to_string(&request)?);
+
+    if let Some(ref vd) = validation_data {
+        if !vd.is_empty() {
+            req = req.header("X-Mme-Nas-Qualify", base64_encode(vd));
+        }
+    }
+
+    let resp = req.send().await?;
     let text = resp.text().await?;
 
     let parsed = plist::Value::from_reader(Cursor::new(text.as_str()))?;
@@ -1447,4 +1457,3 @@ impl IdmsAuthListener {
         })
     }
 }
-

@@ -1053,6 +1053,20 @@ impl KeychainClientState {
         })
     }
 
+    pub fn new_with_host(dsid: String, adsid: String, host: String) -> KeychainClientState {
+        KeychainClientState {
+            dsid,
+            adsid,
+            host,
+            state_token: None,
+            state: HashMap::new(),
+            user_identity: None,
+            current_bottle: None,
+            keystore: KeychainKeyStore(vec![]),
+            items: HashMap::new(),
+        }
+    }
+
     // filter out custodian recovery keys
     pub fn peers(&self) -> impl Iterator<Item = &EncodedPeer> {
         self.state.values().filter(|v| v.0.dynamic_info.is_some())

@@ -218,7 +218,7 @@ pub struct FindMyClient<P: AnisetteProvider> {
     anisette: ArcAnisetteClient<P>,
 }
 
-const SEARCH_PARTY_CONTAINER: CloudKitContainer = CloudKitContainer {
+pub const SEARCH_PARTY_CONTAINER: CloudKitContainer = CloudKitContainer {
     database_type: cloudkit_proto::request_operation::header::Database::PrivateDb,
     bundleid: "com.apple.icloud.searchpartyd",
     containerid: "com.apple.icloud.searchparty",
@@ -572,7 +572,7 @@ struct CommunicationId {
     ids: CommunicationIdIds
 }
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Default, Serialize, Deserialize)]
 pub struct BeaconRatchet {
     index: usize,
     #[serde(serialize_with = "bin_serialize", deserialize_with = "bin_deserialize")]
@@ -763,9 +763,9 @@ impl BeaconAccessory {
 #[derive(CloudKitRecord, Default, Debug, Serialize, Deserialize, Clone)]
 #[cloudkit_record(type = "KeyAlignmentRecord", encrypted, rename_all = "camelCase")]
 pub struct KeyAlignmentRecord {
-    beacon_identifier: String,
-    last_index_observed: i64,
-    last_index_observation_date: Option<SystemTime>, // option for default
+    pub beacon_identifier: String,
+    pub last_index_observed: i64,
+    pub last_index_observation_date: Option<SystemTime>, // option for default
 }
 
 #[derive(DekuRead, Debug)]
@@ -794,7 +794,7 @@ pub struct LeashRecord {
     associated_beacons: Vec<u8>,
 }
 
-const FIND_MY_SERVICE: PCSService = PCSService {
+pub const FIND_MY_SERVICE: PCSService = PCSService {
     name: "com.apple.icloud.searchparty",
     view_hint: "Manatee",
     zone: "Manatee",
