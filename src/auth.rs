@@ -210,7 +210,7 @@ pub struct IDSDelegateResponse {
 #[derive(Deserialize)]
 pub struct MobileMeDelegateResponse {
     pub tokens: HashMap<String, String>,
-    #[serde(rename = "com.apple.mobileme", default)]
+    #[serde(default)]
     pub config: Dictionary,
 }
 
@@ -449,16 +449,17 @@ pub async fn login_apple_delegates<T: AnisetteProvider>(account: &AppleAccount<T
     }
 
     let delegates = parsed_dict.get("delegates").unwrap().as_dictionary().unwrap();
+    let mut mobileme: Option<MobileMeDelegateResponse> =
+        get_delegate(delegates, "com.apple.mobileme")?;
 
-    let mut mme: Option<MobileMeDelegateResponse> = get_delegate(delegates, "com.apple.mobileme")?;
-
-    if let Some(mme) = &mut mme {
-        mme.config = get_delegate(delegates, "com.apple.mobileme")?.expect("No MME??");
+    if let Some(mobileme) = &mut mobileme {
+        mobileme.config =
+            get_delegate(delegates, "com.apple.mobileme")?.expect("No MobileMe service data");
     }
 
     Ok(DelegateResponses {
         ids: get_delegate(delegates, "com.apple.private.ids")?,
-        mobileme: mme,
+        mobileme,
     })
 }
 

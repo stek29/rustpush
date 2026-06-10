@@ -1039,11 +1039,28 @@ pub struct KeychainClientState {
 }
 
 impl KeychainClientState {
+    fn find_escrow_proxy_url(value: &Value) -> Option<&str> {
+        match value {
+            Value::Dictionary(dict) => {
+                if let Some(url) = dict.get("escrowProxyUrl").and_then(Value::as_string) {
+                    return Some(url);
+                }
+
+                dict.values().find_map(Self::find_escrow_proxy_url)
+            }
+            Value::Array(values) => values.iter().find_map(Self::find_escrow_proxy_url),
+            _ => None,
+        }
+    }
+
     pub fn new(dsid: String, adsid: String, delegate: &MobileMeDelegateResponse) -> Option<KeychainClientState> {
+        let config = Value::Dictionary(delegate.config.clone());
+        let host = Self::find_escrow_proxy_url(&config)?.to_string();
+
         Some(KeychainClientState {
             dsid,
             adsid,
-            host: delegate.config.get("com.apple.Dataclass.KeychainSync")?.as_dictionary().unwrap().get("escrowProxyUrl")?.as_string().unwrap().to_string(),
+            host,
             state_token: None,
             state: HashMap::new(),
             user_identity: None,
