@@ -113,7 +113,7 @@ pub struct CuttlefishEncItem {
 
 impl CuttlefishEncItem {
     fn authenticated_data_v2(&self, uuid: &str, fields: &[Field]) -> BTreeMap<String, Vec<u8>> {
-        info!("AAD v2");
+        debug!("Building AAD v2 for keychain item {uuid}");
         let mut aad = BTreeMap::from_iter([
             ("UUID", uuid.as_bytes().to_vec()),
             ("encver", self.encver.to_le_bytes().to_vec()),
@@ -168,7 +168,7 @@ impl CuttlefishEncItem {
     }
 
     fn authenticated_data_v1(&self, uuid: &str) -> BTreeMap<String, Vec<u8>> {
-        info!("AAD v1");
+        debug!("Building AAD v1 for keychain item {uuid}");
         BTreeMap::from_iter([
             ("UUID", uuid.as_bytes().to_vec()),
             ("encver", self.encver.to_le_bytes().to_vec()),
@@ -215,29 +215,56 @@ impl CuttlefishEncItem {
         let item = keystore.get_key_id(self.parent_key_id()).ok_or(PushError::DecryptionKeyNotFound(self.parent_key_id().to_string()))?;
         let result = item.decrypt(&keystore_key, &base64_decode(&self.wrappedkey));
 
-        let mut cipher = CmacSiv::<Aes256>::new_from_slice(&result).unwrap();
+        let mut cipher = CmacSiv::<Aes256>::new_from_slice(&result).map_err(|_| {
+            PushError::KeychainItemDecryptError(format!(
+                "item {uuid} has an invalid {}-byte record key",
+                result.len()
+            ))
+        })?;
 
         let aad = if self.encver == 1 { self.authenticated_data_v1(uuid) } else { self.authenticated_data_v2(uuid, &record.record_field) };
+
+        if self.data.len() < 16 {
+            return Err(PushError::KeychainItemDecryptError(format!(
+                "item {uuid} ciphertext is only {} bytes",
+                self.data.len()
+            )));
+        }
 
         let mut headers = vec![self.data[..16].to_vec()];
         headers.extend(aad.into_values());
 
-        let mut data = cipher.decrypt::<&[Vec<u8>], &Vec<u8>>(&headers, &self.data[16..]).unwrap();
+        let mut data = cipher
+            .decrypt::<&[Vec<u8>], &Vec<u8>>(&headers, &self.data[16..])
+            .map_err(|_| {
+                PushError::KeychainItemDecryptError(format!(
+                    "item {uuid} failed authenticated decryption (encver {})",
+                    self.encver
+                ))
+            })?;
 
         let mut ptr = data.len();
+        let mut found_padding = false;
         while ptr > 0 {
             ptr -= 1;
             if data[ptr] == 0 {
                 continue
             } else if data[ptr] == 0x80 {
                 data.resize(ptr, 0);
+                found_padding = true;
                 break;
             } else {
-                panic!("Bad padding!");
+                return Err(PushError::KeychainItemDecryptError(format!(
+                    "item {uuid} has invalid ISO/IEC 7816-4 padding"
+                )));
             }
         }
 
-        info!("data {}", encode_hex(&data));
+        if !found_padding {
+            return Err(PushError::KeychainItemDecryptError(format!(
+                "item {uuid} has no ISO/IEC 7816-4 padding marker"
+            )));
+        }
 
         Ok(plist::from_bytes(&data)?)
     }
@@ -1405,9 +1432,12 @@ impl<P: AnisetteProvider> KeychainClient<P> {
                 };
                 if record.r#type.as_ref().unwrap().name() == CuttlefishEncItem::record_type() {
                     let item = CuttlefishEncItem::from_record(&record.record_field);
-                    let Ok(mut decoded) = item.decrypt(&identifier, &record, &state.keystore, &cloudkey_access) else {
-                        warn!("Missing decryption key for {}", identifier);
-                        continue;
+                    let mut decoded = match item.decrypt(&identifier, &record, &state.keystore, &cloudkey_access) {
+                        Ok(decoded) => decoded,
+                        Err(error) => {
+                            warn!("Skipping keychain item {identifier}: {error}");
+                            continue;
+                        }
                     };
 
                     encrypt_entry(&mut decoded, &keychain_access);
