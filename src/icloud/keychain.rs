@@ -1138,6 +1138,7 @@ pub const KEYCHAIN_ZONES: &[&str] = &[
 pub struct EscrowMetadata {
     pub serial: String,
     pub build: String,
+    #[serde(default)]
     pub passcode_generation: u32,
     #[serde(rename = "com.apple.securebackup.timestamp")]
     pub timestamp: String,
@@ -1675,6 +1676,32 @@ impl<P: AnisetteProvider> KeychainClient<P> {
     }
 
     pub async fn get_viable_bottles(&self) -> Result<Vec<(EscrowData, EscrowMetadata)>, PushError> {
+        fn metadata_shape(value: &Value) -> String {
+            fn value_type(value: &Value) -> &'static str {
+                match value {
+                    Value::Array(_) => "array",
+                    Value::Dictionary(_) => "dictionary",
+                    Value::Boolean(_) => "boolean",
+                    Value::Data(_) => "data",
+                    Value::Date(_) => "date",
+                    Value::Real(_) => "real",
+                    Value::Integer(_) => "integer",
+                    Value::String(_) => "string",
+                    Value::Uid(_) => "uid",
+                    _ => "unknown",
+                }
+            }
+
+            match value {
+                Value::Dictionary(dict) => dict
+                    .iter()
+                    .map(|(key, value)| format!("{key}:{}", value_type(value)))
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                other => value_type(other).to_string(),
+            }
+        }
+
         #[derive(Deserialize)]
         #[serde(rename_all = "camelCase")]
         struct EscrowMetadataOuter {
@@ -1704,11 +1731,50 @@ impl<P: AnisetteProvider> KeychainClient<P> {
             metrics: Some(vec![])
         }).await?;
 
-        Ok(response.valid.into_iter().filter_map(|data| {
-            let meta = metadata_list.iter().find(|m| m.label == data.id())?;
+        info!(
+            "Escrow lookup returned {} metadata record(s) and {} viable Cuttlefish bottle(s)",
+            metadata_list.len(),
+            response.valid.len()
+        );
 
-            Some((data, plist::from_bytes(&base64_decode(&meta.metadata)).ok()?))
-        }).collect())
+        let mut bottles = Vec::new();
+        let mut missing_metadata = 0;
+        let mut invalid_metadata = 0;
+
+        for data in response.valid {
+            let Some(meta) = metadata_list.iter().find(|m| m.label == data.id()) else {
+                missing_metadata += 1;
+                continue;
+            };
+
+            let decoded = base64_decode(&meta.metadata);
+            match plist::from_bytes::<Value>(&decoded) {
+                Ok(value) => match plist::from_value(&value) {
+                    Ok(metadata) => bottles.push((data, metadata)),
+                    Err(error) => {
+                        debug!(
+                            "Escrow metadata schema mismatch: {error}; top-level shape: [{}]",
+                            metadata_shape(&value)
+                        );
+                        invalid_metadata += 1;
+                    }
+                },
+                Err(error) => {
+                    warn!("Discarding escrow metadata that is not a valid plist: {error}");
+                    invalid_metadata += 1;
+                }
+            }
+        }
+
+        if missing_metadata > 0 || invalid_metadata > 0 {
+            warn!(
+                "Discarded {} bottle(s) without matching escrow metadata and {} bottle(s) with invalid metadata",
+                missing_metadata,
+                invalid_metadata
+            );
+        }
+
+        Ok(bottles)
     }
 
     // returns the keychain identity for the recovered peer
