@@ -371,24 +371,28 @@ pub async fn login_apple_delegates<T: AnisetteProvider>(account: &AppleAccount<T
 
     let username = account.username.as_ref().unwrap();
     
-    // let request = AuthRequest {
-    //     apple_id: username.to_string(),
-    //     client_id: Uuid::new_v4().to_string(),
-    //     delegates: Value::Dictionary(Dictionary::from_iter(delegates.iter().map(|d| d.delegate()))),
-    //     password: pet.to_string()
-    // };
-
-    let request = V2AuthRequest {
-        delegates: Value::Dictionary(Dictionary::from_iter(delegates.iter().map(|d| d.delegate()))),
-        protocol_version: "1.0".to_string(),
-        user_info: V2AuthUserInfo {
-            client_id: Uuid::new_v4().to_string().to_uppercase(),
-            language: "en-US".to_string(),
-            timezone: "America/New_York".to_string(),
-        }
-    };
-
     let validation_data = os_config.generate_validation_data().await.ok();
+    let delegates =
+        Value::Dictionary(Dictionary::from_iter(delegates.iter().map(|d| d.delegate())));
+    let request_body = if validation_data.as_ref().is_some_and(|data| !data.is_empty()) {
+        plist_to_string(&V2AuthRequest {
+            delegates,
+            protocol_version: "1.0".to_string(),
+            user_info: V2AuthUserInfo {
+                client_id: Uuid::new_v4().to_string().to_uppercase(),
+                language: "en-US".to_string(),
+                timezone: "America/New_York".to_string(),
+            },
+        })?
+    } else {
+        debug!("Using legacy delegate login request without validation data");
+        plist_to_string(&AuthRequest {
+            apple_id: username.to_string(),
+            client_id: Uuid::new_v4().to_string(),
+            delegates,
+            password: pet.to_string(),
+        })?
+    };
 
     let base_headers = account.anisette.lock().await.get_headers().await?.clone();
     let mut anisette_headers: HeaderMap = base_headers.into_iter().map(|(a, b)| (HeaderName::from_str(&a).unwrap(), b.parse().unwrap())).collect();
@@ -404,7 +408,7 @@ pub async fn login_apple_delegates<T: AnisetteProvider>(account: &AppleAccount<T
             .header("X-Apple-ADSID", adsid)
             .headers(anisette_headers.clone())
             .basic_auth(username, Some(pet))
-            .body(plist_to_string(&request)?);
+            .body(request_body);
 
     if let Some(ref vd) = validation_data {
         if !vd.is_empty() {
