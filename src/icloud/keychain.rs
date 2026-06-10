@@ -2320,7 +2320,7 @@ impl<P: AnisetteProvider> KeychainClient<P> {
                 ("device_name", Value::String(self.config.get_device_name())),
                 ("SecureBackupMetadataTimestamp", Value::String(formatted_time.to_string())),
                 ("device_platform", Value::Integer(2.into())), // 1 for iPhone
-                ("device_model_class", Value::String("iMac".to_string())), // iPhone, other classes?
+                ("device_model_class", Value::String(self.config.get_model_class())),
                 ("device_mid", Value::String(mid.to_string())),
                 ("device_model", Value::String(self.config.get_register_meta().hardware_version)),
                 ("SecureBackupNumericPassphraseLength", Value::Integer(numeric_length.unwrap_or(0).into())),

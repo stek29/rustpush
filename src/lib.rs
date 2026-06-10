@@ -80,6 +80,9 @@ pub struct DebugMeta {
 pub trait OSConfig: Sync + Send {
     fn build_activation_info(&self, csr: Vec<u8>) -> ActivationInfo;
     fn get_activation_device(&self) -> String;
+    fn get_model_class(&self) -> String {
+        "iMac".to_string()
+    }
     async fn generate_validation_data(&self) -> Result<Vec<u8>, PushError>;
     fn get_protocol_version(&self) -> u32;
     fn get_register_meta(&self) -> RegisterMeta;
