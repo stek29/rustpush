@@ -174,6 +174,8 @@ pub enum PushError {
     DecryptionKeyNotFound(String),
     #[error("Keychain item decryption failed: {0}")]
     KeychainItemDecryptError(String),
+    #[error("RFC 6637 key unwrap failed: {0}")]
+    RFC6637Error(String),
     #[error("Not in clique!")]
     NotInClique,
     #[error("Missing group photo!")]

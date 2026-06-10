@@ -17,6 +17,7 @@ use keystore::KeystorePublicKey;
 use libflate::gzip::{HeaderBuilder, EncodeOptions, Encoder, Decoder};
 use log::{debug, info, warn};
 use num_bigint::{BigInt, Sign};
+use openssl::aes::{unwrap_key as aes_unwrap_key, wrap_key as aes_wrap_key, AesKey};
 use openssl::bn::{BigNum, BigNumContext};
 use openssl::derive::Deriver;
 use openssl::ec::{EcGroup, EcKey, EcPoint, PointConversionForm};
@@ -26,7 +27,6 @@ use openssl::pkey::{HasPublic, PKey, Private, Public};
 use openssl::rsa::Rsa;
 use openssl::sha::sha256;
 use openssl::sign::{Signer, Verifier};
-use openssl::symm::{decrypt, encrypt, Cipher, Crypter, Mode};
 use plist::{Data, Date, Dictionary, Error, Uid, Value};
 use base64::Engine;
 use prost::Message;
@@ -1566,6 +1566,13 @@ fn rfc6637_kdf(fingerprint: &[u8], secret: &[u8]) -> [u8; 32] {
 }
 
 pub fn rfc6637_wrap_key<T: HasPublic>(public_key: &CompactECKey<T>, key: &[u8], fingerprint: &[u8]) -> Result<Vec<u8>, PushError> {
+    if key.is_empty() || key.len() + 3 >= 40 {
+        return Err(PushError::RFC6637Error(format!(
+            "unsupported plaintext key length {}",
+            key.len()
+        )));
+    }
+
     let ephemeral = CompactECKey::new()?;
 
     let private_key = ephemeral.get_pkey();
@@ -1588,12 +1595,10 @@ pub fn rfc6637_wrap_key<T: HasPublic>(public_key: &CompactECKey<T>, key: &[u8], 
         *i = padding_count as u8;
     }
 
-    let mut c = Crypter::new(Cipher::from_nid(Nid::ID_AES128_WRAP).unwrap(), Mode::Encrypt, &aes_key[..16], None)?;
-    let mut out = vec![0u8; message.len() + 16];
-
-    let mut count = c.update(&message, &mut out)?;
-    // Provide at least 8 bytes for finalize(), even though it returns 0
-    count += c.finalize(&mut out[count..count + 8])?;
+    let wrapping_key = AesKey::new_encrypt(&aes_key[..16]).map_err(PushError::KeyError)?;
+    let mut out = vec![0u8; message.len() + 8];
+    let count =
+        aes_wrap_key(&wrapping_key, None, &mut out, &message).map_err(PushError::KeyError)?;
     out.truncate(count);
 
     Ok(RFC6637WrappedKey {
@@ -1607,7 +1612,13 @@ pub fn rfc6637_wrap_key<T: HasPublic>(public_key: &CompactECKey<T>, key: &[u8], 
 pub fn rfc6637_unwrap_key(private_key: &CompactECKey<Private>, wrapped_key: &[u8], fingerprint: &[u8]) -> Result<Vec<u8>, PushError> {
     let (_, unpacked) = RFC6637WrappedKey::from_bytes((wrapped_key, 0))?;
 
-    let compact = CompactECKey::decompress(unpacked.public_ephemeral.try_into().expect("RFC6637 Bad Ephemeral size"));
+    let public_ephemeral: [u8; 32] = unpacked.public_ephemeral.try_into().map_err(|value: Vec<u8>| {
+        PushError::RFC6637Error(format!(
+            "invalid ephemeral public key length {}",
+            value.len()
+        ))
+    })?;
+    let compact = CompactECKey::decompress(public_ephemeral);
     
     let private_key = private_key.get_pkey();
     let public_key = compact.get_pkey();
@@ -1618,23 +1629,90 @@ pub fn rfc6637_unwrap_key(private_key: &CompactECKey<Private>, wrapped_key: &[u8
     // RFC6637 KDF
     let hash = rfc6637_kdf(fingerprint, &secret);
 
-    let unwrapped = decrypt(Cipher::from_nid(Nid::ID_AES128_WRAP).unwrap(), &hash[..16], None, &unpacked.wrapped)?;
-
-    let padding_len = *unwrapped.last().unwrap() as usize;
-    for i in 0..padding_len {
-        if unwrapped[unwrapped.len() - 1 - i] != padding_len as u8 {
-            panic!("Invalid padding!");
-        }
+    if unpacked.wrapped.len() < 16 || unpacked.wrapped.len() % 8 != 0 {
+        return Err(PushError::RFC6637Error(format!(
+            "invalid wrapped key length {}",
+            unpacked.wrapped.len()
+        )));
     }
-    let key_len = unwrapped.len() - padding_len - 1 - 2;
+
+    let unwrapping_key = AesKey::new_decrypt(&hash[..16]).map_err(PushError::KeyError)?;
+    let mut unwrapped = vec![0u8; unpacked.wrapped.len() - 8];
+    let count = aes_unwrap_key(
+        &unwrapping_key,
+        None,
+        &mut unwrapped,
+        &unpacked.wrapped,
+    )
+    .map_err(|_| PushError::RFC6637Error("AES key-wrap integrity check failed".to_string()))?;
+    unwrapped.truncate(count);
+
+    if unwrapped.len() < 4 || unwrapped[0] != 1 {
+        return Err(PushError::RFC6637Error(
+            "invalid plaintext framing".to_string(),
+        ));
+    }
+
+    let padding_len = *unwrapped
+        .last()
+        .ok_or_else(|| PushError::RFC6637Error("empty plaintext".to_string()))?
+        as usize;
+    if padding_len == 0 || padding_len + 3 >= unwrapped.len() {
+        return Err(PushError::RFC6637Error(format!(
+            "invalid padding length {padding_len}"
+        )));
+    }
+    if !unwrapped[unwrapped.len() - padding_len..]
+        .iter()
+        .all(|byte| *byte == padding_len as u8)
+    {
+        return Err(PushError::RFC6637Error(
+            "invalid plaintext padding".to_string(),
+        ));
+    }
+
+    let key_len = unwrapped.len() - padding_len - 3;
     let key = &unwrapped[1..key_len + 1];
 
     let checksum = key.iter().fold(0u16, |acc, i| acc.wrapping_add(*i as u16));
-    if checksum != u16::from_be_bytes(unwrapped[1 + key_len..1 + key_len + 2].try_into().unwrap()) {
-        panic!("Bad checksum!")
+    let encoded_checksum = u16::from_be_bytes(
+        unwrapped[1 + key_len..1 + key_len + 2]
+            .try_into()
+            .map_err(|_| PushError::RFC6637Error("missing checksum".to_string()))?,
+    );
+    if checksum != encoded_checksum {
+        return Err(PushError::RFC6637Error(
+            "plaintext checksum mismatch".to_string(),
+        ));
     }
 
     Ok(key.to_vec())
+}
+
+#[cfg(test)]
+mod rfc6637_tests {
+    use super::{rfc6637_unwrap_key, rfc6637_wrap_key, CompactECKey};
+
+    #[test]
+    fn rfc6637_key_wrap_round_trip() {
+        let recipient = CompactECKey::new().unwrap();
+        let key = [0x5a; 16];
+        let wrapped = rfc6637_wrap_key(&recipient, &key, b"fingerprint").unwrap();
+        let unwrapped =
+            rfc6637_unwrap_key(&recipient, &wrapped, b"fingerprint").unwrap();
+
+        assert_eq!(unwrapped, key);
+    }
+
+    #[test]
+    fn rfc6637_rejects_tampered_wrapped_key() {
+        let recipient = CompactECKey::new().unwrap();
+        let mut wrapped =
+            rfc6637_wrap_key(&recipient, &[0x5a; 16], b"fingerprint").unwrap();
+        *wrapped.last_mut().unwrap() ^= 1;
+
+        assert!(rfc6637_unwrap_key(&recipient, &wrapped, b"fingerprint").is_err());
+    }
 }
 
 #[derive(AsnType, Encode, Decode)]
@@ -2596,9 +2674,6 @@ impl Into<String> for NSURL {
         format!("{}{}", self.base, self.relative)
     }
 }
-
-
-
 use std::io;
 
 pub trait BinaryReadExt: Read {

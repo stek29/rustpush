@@ -931,7 +931,6 @@ impl PCSShareProtection {
             other.map(|other| (key.borrow(), other))
         }).expect("Could not find decode key!!");
         let rm_master_key = PCSKey::new(key, &share_key.ciphertext)?;
-        info!("MAster key {}", encode_hex(&rm_master_key.0));
 
         let share_flags = share_key.flags.unwrap_or_default();
         let readonly = (share_flags & 1) != 0;
