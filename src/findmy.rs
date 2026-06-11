@@ -426,6 +426,7 @@ pub struct MasterBeaconRecord {
     pub model: String,
     pub vendor_id: i64,
     pub is_zeus: i64,
+    pub group_identifier: Option<String>,
 }
 
 #[derive(CloudKitRecord, Default, Debug, Serialize, Deserialize, Clone)]
